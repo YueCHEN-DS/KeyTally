@@ -1,0 +1,21 @@
+# Swift Package Manager and Xcode output
+.build/
+.swiftpm/
+DerivedData/
+
+# Locally built application bundles
+dist/
+
+# macOS metadata
+.DS_Store
+
+# Local KeyTally data and exports
+counts.json
+**/counts.json
+*.keytally.csv
+
+# Editor and temporary files
+.idea/
+.vscode/
+*.swp
+*.tmp
