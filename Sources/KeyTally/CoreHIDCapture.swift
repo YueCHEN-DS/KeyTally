@@ -266,24 +266,26 @@ actor CoreHIDCapture {
     }
 
     private static func transportName(_ transport: HIDDeviceTransport?) -> String? {
-        switch transport {
-        case .usb: return "USB"
-        case .bluetooth: return "Bluetooth"
-        case .bluetoothLowEnergy: return "Bluetooth Low Energy"
-        case .bluetoothAACP: return "Bluetooth AACP"
-        case .i2c: return "I2C"
-        case .spi: return "SPI"
-        case .serial: return "Serial"
-        case .spu: return "SPU"
-        case .fifo: return "FIFO"
-        case .virtual: return "Virtual"
-        case .unknown(let value): return value
-        case .aid: return "AID"
-        case .iap: return "iAP"
-        case .airPlay: return "AirPlay"
-        case .inductiveInBand: return "Inductive In-Band"
-        case .none: return nil
-        case .some(let value): return String(describing: value)
+        // CoreHID has added transport enum cases in newer SDKs. Matching the
+        // stable textual names keeps a macOS 15 SDK build compatible with newer
+        // development SDKs without making V1 depend on a newer case.
+        guard let transport else { return nil }
+        switch String(describing: transport) {
+        case "usb": return "USB"
+        case "bluetooth": return "Bluetooth"
+        case "bluetoothLowEnergy": return "Bluetooth Low Energy"
+        case "bluetoothAACP": return "Bluetooth AACP"
+        case "i2c": return "I2C"
+        case "spi": return "SPI"
+        case "serial": return "Serial"
+        case "spu": return "SPU"
+        case "fifo": return "FIFO"
+        case "virtual": return "Virtual"
+        case "aid": return "AID"
+        case "iap": return "iAP"
+        case "airPlay": return "AirPlay"
+        case "inductiveInBand": return "Inductive In-Band"
+        default: return String(describing: transport)
         }
     }
 }
