@@ -25,6 +25,3 @@ CoreHID permission and physical keyboard behavior must be validated manually on
 macOS. Because local builds are ad-hoc signed, macOS may require Input
 Monitoring authorization again whenever the application bundle is rebuilt.
 
-Please keep generated output (`.build/`, `dist/`, `.DS_Store`) and personal
-count files out of commits. Pull requests should describe the macOS version and
-keyboard hardware used for any CoreHID change.
