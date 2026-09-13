@@ -13,6 +13,11 @@ This repository contains source code and tests. It intentionally does not
 publish a built application, installer, DMG, updater, or App Store package.
 The V1 target is local use and transparent review.
 
+## Launch articles
+
+- [English launch essay](docs/KeyTally-launch-en.md)
+- [中文介绍文章](docs/KeyTally-launch-zh.md)
+
 ## Build locally
 
 Requirements:
