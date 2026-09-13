@@ -8,6 +8,10 @@
 
 There is a particular kind of Mac problem that only appears after a key has been pressed thousands of times: a sticky space bar, a tired Return key, or one letter that suddenly needs a firmer touch. Most of us notice the failure long before we have any idea which keys did the work.
 
+![KeyTally architecture](images/keytally-architecture.png)
+
+*KeyTally’s V1 flow: physical keyboard → CoreHID → transition counter → local dashboard.*
+
 KeyTally is a small answer to that question. It sits in the macOS menu bar and counts physical key presses by keyboard. The goal is not to record what anyone writes. It is simply to make wear and usage visible: which keys are busiest today, how the total changes over time, and whether the built-in keyboard is doing most of the work or an external one is.
 
 The project uses Apple’s CoreHID framework rather than a global text-event tap. That lets KeyTally keep the built-in keyboard separate from USB and Bluetooth keyboards when macOS exposes enough device metadata to identify them. A press is counted only when a key changes from released to pressed; held-key repeats are ignored. Daily totals and lifetime totals are calculated from the per-keyboard records.
