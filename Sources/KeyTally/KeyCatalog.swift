@@ -53,13 +53,51 @@ enum KeyCatalog {
         return result
     }()
 
+    static let buttonPage: UInt16 = 0x09
+    static let genericDesktopPage: UInt16 = 0x01
+    static let mouseLeftButton: UInt16 = 1
+    static let mouseRightButton: UInt16 = 2
+    static let mouseMiddleButton: UInt16 = 3
+    static let mouseWheelScroll: UInt16 = 0x38
+
     static let countedUsageIDs = Set(labels.keys)
 
     static func label(for key: KeyID) -> String {
+        if key.usagePage == buttonPage {
+            switch key.usageID {
+            case mouseLeftButton: return "Left Click"
+            case mouseRightButton: return "Right Click"
+            case mouseMiddleButton: return "Wheel Click"
+            default: return "Button \(key.usageID)"
+            }
+        }
+        if key.usagePage == genericDesktopPage && key.usageID == mouseWheelScroll {
+            return "Wheel Scroll"
+        }
         guard key.usagePage == keyboardPage else {
             return "Usage \(key.usagePage):\(key.usageID)"
         }
         return labels[key.usageID] ?? "Key \(key.usageID)"
+    }
+
+    static func isMouseClickKey(_ key: KeyID) -> Bool {
+        key.usagePage == buttonPage
+            && [mouseLeftButton, mouseRightButton, mouseMiddleButton].contains(key.usageID)
+    }
+
+    static func isWheelScrollKey(_ key: KeyID) -> Bool {
+        key.usagePage == genericDesktopPage && key.usageID == mouseWheelScroll
+    }
+
+    /// Mouse section includes clicks and wheel scroll.
+    static func isMouseKey(_ key: KeyID) -> Bool {
+        isMouseClickKey(key) || isWheelScrollKey(key)
+    }
+
+    /// Headline Today/Lifetime totals count key presses and mouse clicks only.
+    /// Continuous wheel scroll is shown in the mouse section but not summed here.
+    static func contributesToHeadlineTotal(_ key: KeyID) -> Bool {
+        !isWheelScrollKey(key)
     }
 
     static let heatmapRows: [[KeyDefinition]] = [

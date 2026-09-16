@@ -70,4 +70,28 @@ final class PressStateTrackerTests: XCTestCase {
         XCTAssertFalse(tracker.process(deviceID: 1, key: aKey, isPressed: false))
         XCTAssertTrue(tracker.process(deviceID: 1, key: aKey, isPressed: true))
     }
+
+    func testMouseButtonsTransitions() {
+        var tracker = PressStateTracker()
+        let leftButton = KeyID(usagePage: KeyCatalog.buttonPage, usageID: KeyCatalog.mouseLeftButton)
+        let rightButton = KeyID(usagePage: KeyCatalog.buttonPage, usageID: KeyCatalog.mouseRightButton)
+        let wheelButton = KeyID(usagePage: KeyCatalog.buttonPage, usageID: KeyCatalog.mouseMiddleButton)
+
+        // Left click 0 -> 1
+        XCTAssertTrue(tracker.process(deviceID: 10, key: leftButton, isPressed: true))
+        // Held left click does not count again
+        XCTAssertFalse(tracker.process(deviceID: 10, key: leftButton, isPressed: true))
+        // Simultaneous right click counts
+        XCTAssertTrue(tracker.process(deviceID: 10, key: rightButton, isPressed: true))
+        // Wheel click counts
+        XCTAssertTrue(tracker.process(deviceID: 10, key: wheelButton, isPressed: true))
+
+        // Release buttons
+        XCTAssertFalse(tracker.process(deviceID: 10, key: leftButton, isPressed: false))
+        XCTAssertFalse(tracker.process(deviceID: 10, key: rightButton, isPressed: false))
+        XCTAssertFalse(tracker.process(deviceID: 10, key: wheelButton, isPressed: false))
+
+        // New left click counts again
+        XCTAssertTrue(tracker.process(deviceID: 10, key: leftButton, isPressed: true))
+    }
 }

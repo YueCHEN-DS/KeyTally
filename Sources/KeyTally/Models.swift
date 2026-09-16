@@ -34,6 +34,7 @@ struct KeyboardDescriptor: Hashable, Sendable {
     let reportedName: String
     let isBuiltIn: Bool
     let elementCount: Int
+    var isMouse: Bool = false
 }
 
 struct KeyboardRecord: Codable, Hashable, Identifiable, Sendable {
@@ -41,6 +42,11 @@ struct KeyboardRecord: Codable, Hashable, Identifiable, Sendable {
     var reportedName: String
     var customName: String?
     let isBuiltIn: Bool
+    var isMouse: Bool? = false
+
+    var isMouseDevice: Bool {
+        isMouse ?? false
+    }
 
     var displayName: String {
         let trimmed = customName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -69,6 +75,32 @@ struct DailyTotal: Identifiable, Equatable, Sendable {
     let total: UInt64
 
     var id: String { date }
+}
+
+/// Keyboard presses vs mouse clicks. Wheel scroll is tracked separately and
+/// excluded from `headline`.
+struct InputKindTotals: Equatable, Sendable {
+    var keyboard: UInt64 = 0
+    var mouseClicks: UInt64 = 0
+    var wheelScroll: UInt64 = 0
+
+    var headline: UInt64 { keyboard + mouseClicks }
+
+    init() {}
+
+    init(counts: [String: UInt64]) {
+        self.init()
+        for (storageKey, count) in counts {
+            guard let key = KeyID(storageKey: storageKey) else { continue }
+            if KeyCatalog.isWheelScrollKey(key) {
+                wheelScroll += count
+            } else if KeyCatalog.isMouseClickKey(key) {
+                mouseClicks += count
+            } else {
+                keyboard += count
+            }
+        }
+    }
 }
 
 enum InputPermissionState: String, Sendable {
@@ -108,23 +140,25 @@ enum DeviceIdentity {
         transport: String?,
         uniqueID: String?,
         serialNumber: String?,
-        locationID: UInt64?
+        locationID: UInt64?,
+        isMouse: Bool = false
     ) -> (stableID: String, reportedName: String) {
         let manufacturer = clean(manufacturer)
         let product = clean(product)
         let modelNumber = clean(modelNumber)
         let transport = clean(transport)
 
+        let prefix = isMouse ? "mouse" : "kbd"
         let source: String
         if isBuiltIn {
             source = "built-in|\(systemModelIdentifier())"
         } else if let uniqueID = clean(uniqueID) {
-            source = "unique|\(uniqueID)"
+            source = "\(prefix)-unique|\(uniqueID)"
         } else if let serialNumber = clean(serialNumber) {
-            source = "serial|\(serialNumber)"
+            source = "\(prefix)-serial|\(serialNumber)"
         } else if vendorID != 0 || productID != 0 || product != nil || locationID != nil {
             source = [
-                "hardware",
+                prefix,
                 String(vendorID),
                 String(productID),
                 product ?? "",
@@ -132,7 +166,7 @@ enum DeviceIdentity {
                 locationID.map(String.init) ?? ""
             ].joined(separator: "|")
         } else {
-            source = "runtime|\(runtimeID)"
+            source = "\(prefix)-runtime|\(runtimeID)"
         }
 
         let reportedName: String
@@ -148,12 +182,16 @@ enum DeviceIdentity {
                 reportedName = joinedName(manufacturer, product)
             }
         } else if vendorID != 0 || productID != 0 {
-            reportedName = String(format: "External Keyboard %04X:%04X", vendorID, productID)
+            reportedName = String(
+                format: isMouse ? "External Mouse %04X:%04X" : "External Keyboard %04X:%04X",
+                vendorID,
+                productID
+            )
         } else {
-            reportedName = "Unknown Keyboard"
+            reportedName = isMouse ? "External Mouse" : "Unknown Keyboard"
         }
 
-        return ("kbd-\(sha256(source))", reportedName)
+        return ("\(prefix)-\(sha256(source))", reportedName)
     }
 
     private static func clean(_ value: String?) -> String? {

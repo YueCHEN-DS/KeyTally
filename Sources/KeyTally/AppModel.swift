@@ -18,6 +18,7 @@ final class AppModel {
     var selectedDate = LocalDay.string()
     var selectedKeyboardID: String?
     var isPaused = false
+    var isAllTime = false
 
     @ObservationIgnored private let store: JSONStore
     @ObservationIgnored private var didStart = false
@@ -45,20 +46,60 @@ final class AppModel {
     var sortedKeyboards: [KeyboardRecord] {
         keyboards.values.sorted {
             if $0.isBuiltIn != $1.isBuiltIn { return $0.isBuiltIn }
+            if $0.isMouseDevice != $1.isMouseDevice {
+                return !$0.isMouseDevice
+            }
             return $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
         }
     }
 
+    var isSelectedDeviceMouse: Bool {
+        guard let id = selectedKeyboardID else { return false }
+        return keyboards[id]?.isMouseDevice == true
+    }
+
+    var hasMouseActivity: Bool {
+        selectedCounts.keys.contains { keyStr in
+            guard let key = KeyID(storageKey: keyStr) else { return false }
+            return KeyCatalog.isMouseKey(key)
+        }
+    }
+
+    var selectedMouseCounts: [String: UInt64] {
+        selectedCounts.filter { keyStr, _ in
+            guard let key = KeyID(storageKey: keyStr) else { return false }
+            return KeyCatalog.isMouseKey(key)
+        }
+    }
+
+    var selectedKeyboardCounts: [String: UInt64] {
+        selectedCounts.filter { keyStr, _ in
+            guard let key = KeyID(storageKey: keyStr) else { return false }
+            return !KeyCatalog.isMouseKey(key)
+        }
+    }
+
     var selectedCounts: [String: UInt64] {
-        countsFor(date: selectedDate, keyboardID: selectedKeyboardID)
+        if isAllTime {
+            return lifetimeCounts(keyboardID: selectedKeyboardID)
+        }
+        return countsFor(date: selectedDate, keyboardID: selectedKeyboardID)
+    }
+
+    var selectedTotals: InputKindTotals {
+        InputKindTotals(counts: selectedCounts)
     }
 
     var selectedTotal: UInt64 {
-        selectedCounts.values.reduce(0, +)
+        selectedTotals.headline
     }
 
     var selectedLifetimeTotal: UInt64 {
-        lifetimeTotal(keyboardID: selectedKeyboardID)
+        selectedLifetimeTotals.headline
+    }
+
+    var selectedLifetimeTotals: InputKindTotals {
+        lifetimeTotals(keyboardID: selectedKeyboardID)
     }
 
     var selectedDailyHistory: [DailyTotal] {
@@ -67,12 +108,21 @@ final class AppModel {
         }
     }
 
+    var todayTotals: InputKindTotals {
+        InputKindTotals(counts: countsFor(date: today, keyboardID: selectedKeyboardID))
+    }
+
+    var lifetimeSplit: InputKindTotals {
+        lifetimeTotals(keyboardID: selectedKeyboardID)
+    }
+
+    /// All-devices headline total (keyboard presses + mouse clicks, no wheel scroll).
     var todayTotal: UInt64 {
-        totalFor(date: today, keyboardID: nil)
+        InputKindTotals(counts: countsFor(date: today, keyboardID: nil)).headline
     }
 
     var lifetimeTotal: UInt64 {
-        lifetimeTotal(keyboardID: nil)
+        lifetimeTotals(keyboardID: nil).headline
     }
 
     var hasInputAccess: Bool {
@@ -87,7 +137,11 @@ final class AppModel {
         if let storageError { return storageError }
         if !hasInputAccess {
             if let captureMessage { return captureMessage }
-            if permissionState == .granted { return "Waiting for CoreHID keyboard access…" }
+            // Permission APIs can be stale after an ad-hoc rebuild. Prefer
+            // explaining the re-grant path over a generic waiting message.
+            if permissionState == .granted {
+                return "Input Monitoring is on, but this build still cannot open keyboards. Toggle KeyTally off/on in Settings, then Recheck."
+            }
             return "Input Monitoring permission required"
         }
         if isPaused { return "Paused" }
@@ -116,22 +170,26 @@ final class AppModel {
             isPaused = true
         }
 
+        // Always start CoreHID. A stale IOHIDCheckAccess/CGPreflight result must
+        // not block capture: usable element access is the source of truth.
+        _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
         refreshPermission()
-        if permissionState != .granted {
-            _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
-            refreshPermission()
-        }
         ensureCaptureStarted()
         permissionTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
                 guard !Task.isCancelled else { return }
                 guard let self else { return }
-                let previousState = self.permissionState
+                let previousPermission = self.permissionState
                 self.refreshPermission()
-                self.retryCaptureIfNeeded(
-                    force: previousState == .granted && self.permissionState != .granted
-                )
+                // Immediate rebuild when permission flips either direction.
+                let permissionChanged = previousPermission != self.permissionState
+                self.retryCaptureIfNeeded(force: permissionChanged)
+                // Soft retry while Input Monitoring is on but clients still
+                // have zero usable elements (stale ad-hoc TCC, BLE lag).
+                if !self.hasInputAccess && self.permissionState == .granted {
+                    self.retryCaptureIfNeeded(force: false)
+                }
             }
         }
     }
@@ -148,7 +206,9 @@ final class AppModel {
     }
 
     func requestInputMonitoring() {
+        // Register this exact build with TCC, then rebuild clients.
         _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+        _ = CGRequestListenEventAccess()
         refreshPermission()
         retryCaptureIfNeeded(force: true)
     }
@@ -181,6 +241,7 @@ final class AppModel {
     func resetCounts() async {
         counts.removeAll()
         selectedDate = today
+        isAllTime = false
         storageError = nil
         do {
             try await store.save(snapshot())
@@ -257,13 +318,35 @@ final class AppModel {
     }
 
     func totalFor(date: String, keyboardID: String?) -> UInt64 {
-        countsFor(date: date, keyboardID: keyboardID).values.reduce(0, +)
+        InputKindTotals(counts: countsFor(date: date, keyboardID: keyboardID)).headline
     }
 
     func lifetimeTotal(keyboardID: String?) -> UInt64 {
-        counts.keys.reduce(0) { partialTotal, date in
-            partialTotal + totalFor(date: date, keyboardID: keyboardID)
+        lifetimeTotals(keyboardID: keyboardID).headline
+    }
+
+    func lifetimeTotals(keyboardID: String?) -> InputKindTotals {
+        InputKindTotals(counts: lifetimeCounts(keyboardID: keyboardID))
+    }
+
+    func lifetimeCounts(keyboardID: String?) -> [String: UInt64] {
+        var combined: [String: UInt64] = [:]
+        for devices in counts.values {
+            let keyCounts: [String: UInt64]
+            if let keyboardID {
+                keyCounts = devices[keyboardID] ?? [:]
+            } else {
+                keyCounts = devices.values.reduce(into: [:]) { result, deviceKeys in
+                    for (key, count) in deviceKeys {
+                        result[key, default: 0] += count
+                    }
+                }
+            }
+            for (key, count) in keyCounts {
+                combined[key, default: 0] += count
+            }
         }
+        return combined
     }
 
     func registerForTesting(_ descriptor: KeyboardDescriptor) {
@@ -303,8 +386,9 @@ final class AppModel {
     private func register(_ descriptor: KeyboardDescriptor) {
         var changed = false
         if var existing = keyboards[descriptor.stableID] {
-            if existing.reportedName != descriptor.reportedName {
+            if existing.reportedName != descriptor.reportedName || existing.isMouse != descriptor.isMouse {
                 existing.reportedName = descriptor.reportedName
+                existing.isMouse = descriptor.isMouse
                 keyboards[descriptor.stableID] = existing
                 changed = true
             }
@@ -313,7 +397,8 @@ final class AppModel {
                 id: descriptor.stableID,
                 reportedName: descriptor.reportedName,
                 customName: nil,
-                isBuiltIn: descriptor.isBuiltIn
+                isBuiltIn: descriptor.isBuiltIn,
+                isMouse: descriptor.isMouse
             )
             changed = true
         }
@@ -324,16 +409,24 @@ final class AppModel {
 
     private func record(stableID: String, key: KeyID, date: String) {
         counts[date, default: [:]][stableID, default: [:]][key.storageKey, default: 0] += 1
-        selectedDate = date
+        if !isAllTime {
+            selectedDate = date
+        }
         scheduleSave()
     }
 
     private func refreshPermission() {
-        let newState: InputPermissionState
+        // Never let a stale negative result disable capture. If CoreHID later
+        // yields usable elements, hasInputAccess becomes the UI authority.
         let hidAccess = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)
-        if hidAccess == kIOHIDAccessTypeGranted || CGPreflightListenEventAccess() {
+        let cgGranted = CGPreflightListenEventAccess()
+        let newState: InputPermissionState
+        if hidAccess == kIOHIDAccessTypeGranted || cgGranted {
             newState = .granted
-        } else if hidAccess == kIOHIDAccessTypeDenied {
+        } else if hasInputAccess {
+            // Elements already open for this process — treat as granted.
+            newState = .granted
+        } else if hidAccess == kIOHIDAccessTypeDenied && !cgGranted {
             newState = .denied
         } else {
             newState = .unknown
@@ -400,6 +493,7 @@ final class AppModel {
             return (day.date, devices)
         })
         selectedDate = availableDates.first ?? today
+        isAllTime = false
     }
 
     private func csvCell(_ value: String) -> String {

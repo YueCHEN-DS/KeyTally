@@ -64,11 +64,14 @@ actor CoreHIDCapture {
         self.manager = manager
         managerTask = Task { [weak self] in
             do {
-                let criteria = HIDDeviceManager.DeviceMatchingCriteria(
+                let keyboardCriteria = HIDDeviceManager.DeviceMatchingCriteria(
                     primaryUsage: .genericDesktop(.keyboard)
                 )
+                let mouseCriteria = HIDDeviceManager.DeviceMatchingCriteria(
+                    primaryUsage: .genericDesktop(.mouse)
+                )
                 let notifications = await manager.monitorNotifications(
-                    matchingCriteria: [criteria]
+                    matchingCriteria: [keyboardCriteria, mouseCriteria]
                 )
 
                 for try await notification in notifications {
@@ -119,18 +122,52 @@ actor CoreHIDCapture {
             return
         }
 
+        let isBuiltIn = await client.isBuiltIn
+        let primaryUsage = await client.primaryUsage
+        let isMouse = primaryUsage == HIDUsage(page: 1, usage: 2)
+
+        // Exclude built-in pointer/mouse (such as internal trackpads)
+        if isMouse && isBuiltIn {
+            return
+        }
+
         let transport = await client.transport
         if transport == .virtual {
             return
         }
 
         let allElements = await client.elements
-        let keyboardElements = allElements.filter { element in
-            guard case .input = element.type,
-                  case .keyboardOrKeypad(let usage?) = element.usage else {
+        let monitoredElements: [HIDElement]
+        if isMouse {
+            monitoredElements = allElements.filter { element in
+                guard case .input = element.type else { return false }
+                // Match typed enum cases first, then fall back to raw page/usage
+                // values. CoreHID may return raw HIDUsage structs that don't
+                // decode into the typed Swift enum cases.
+                if case .button(let usage?) = element.usage {
+                    return (1...3).contains(usage)
+                }
+                if case .genericDesktop(let usage?) = element.usage, case .wheel = usage {
+                    return true
+                }
+                // Fallback: match raw page/usage integers
+                let raw = Self.rawPageUsage(element.usage)
+                if raw.page == KeyCatalog.buttonPage && (1...3).contains(raw.usage) {
+                    return true
+                }
+                if raw.page == KeyCatalog.genericDesktopPage && raw.usage == KeyCatalog.mouseWheelScroll {
+                    return true
+                }
                 return false
             }
-            return KeyCatalog.countedUsageIDs.contains(usage.rawValue)
+        } else {
+            monitoredElements = allElements.filter { element in
+                guard case .input = element.type,
+                      case .keyboardOrKeypad(let usage?) = element.usage else {
+                    return false
+                }
+                return KeyCatalog.countedUsageIDs.contains(usage.rawValue)
+            }
         }
 
         let manufacturer = await client.manufacturer
@@ -141,7 +178,6 @@ actor CoreHIDCapture {
         let uniqueID = await client.uniqueID
         let serialNumber = await client.serialNumber
         let locationID = await client.locationID
-        let isBuiltIn = await client.isBuiltIn
         let transportName = Self.transportName(transport)
         let identity = DeviceIdentity.make(
             runtimeID: runtimeID,
@@ -154,38 +190,49 @@ actor CoreHIDCapture {
             transport: transportName,
             uniqueID: uniqueID,
             serialNumber: serialNumber,
-            locationID: locationID
+            locationID: locationID,
+            isMouse: isMouse
         )
         let descriptor = KeyboardDescriptor(
             runtimeID: runtimeID,
             stableID: identity.stableID,
             reportedName: identity.reportedName,
             isBuiltIn: isBuiltIn,
-            elementCount: keyboardElements.count
+            elementCount: monitoredElements.count,
+            isMouse: isMouse
         )
 
         clients[runtimeID] = client
         descriptors[runtimeID] = descriptor
         onEvent(.keyboardConnected(descriptor))
 
-        guard !keyboardElements.isEmpty else {
-            onEvent(.problem(
-                "\(descriptor.reportedName) has no accessible keyboard elements yet. Enable Input Monitoring for this build."
-            ))
+        guard !monitoredElements.isEmpty else {
+            // Distinguish "device opened but filter matched nothing" from
+            // "TCC/Input Monitoring blocked this ad-hoc build".
+            let rawCount = allElements.count
+            if rawCount == 0 {
+                onEvent(.problem(
+                    "\(descriptor.reportedName) is visible but macOS returned 0 HID elements. Toggle KeyTally off/on in Input Monitoring for this build, then Recheck."
+                ))
+            } else {
+                onEvent(.problem(
+                    "\(descriptor.reportedName) exposed \(rawCount) input elements, but none matched keyboard/mouse controls."
+                ))
+            }
             return
         }
 
         await seedCurrentState(
             client: client,
             runtimeID: runtimeID,
-            elements: keyboardElements
+            elements: monitoredElements
         )
 
         deviceTasks[runtimeID] = Task { [weak self] in
             do {
                 let notifications = await client.monitorNotifications(
                     reportIDsToMonitor: [],
-                    elementsToMonitor: keyboardElements
+                    elementsToMonitor: monitoredElements
                 )
                 for try await notification in notifications {
                     guard !Task.isCancelled else { break }
@@ -203,7 +250,7 @@ actor CoreHIDCapture {
                 return
             } catch {
                 self?.onEvent(.problem(
-                    "Keyboard monitoring failed for \(descriptor.reportedName): \(error.localizedDescription)"
+                    "Input monitoring failed for \(descriptor.reportedName): \(error.localizedDescription)"
                 ))
             }
         }
@@ -222,6 +269,9 @@ actor CoreHIDCapture {
         }
         for value in values {
             guard let key = Self.keyID(for: value.element) else { continue }
+            if key.usagePage == KeyCatalog.genericDesktopPage && key.usageID == KeyCatalog.mouseWheelScroll {
+                continue
+            }
             let isPressed = value.integerValue(asTypeTruncatingIfNeeded: UInt64.self) != 0
             tracker.seed(deviceID: runtimeID, key: key, isPressed: isPressed)
         }
@@ -234,6 +284,18 @@ actor CoreHIDCapture {
     ) {
         for value in values {
             guard let key = Self.keyID(for: value.element) else { continue }
+
+            if key.usagePage == KeyCatalog.genericDesktopPage && key.usageID == KeyCatalog.mouseWheelScroll {
+                let delta = value.integerValue(asTypeTruncatingIfNeeded: Int64.self)
+                if delta != 0 && !paused {
+                    let notches = max(UInt64(abs(delta)), 1)
+                    for _ in 0..<notches {
+                        onEvent(.keyPressed(stableID: stableID, key: key))
+                    }
+                }
+                continue
+            }
+
             let isPressed = value.integerValue(asTypeTruncatingIfNeeded: UInt64.self) != 0
             let isNewPress = tracker.process(
                 deviceID: runtimeID,
@@ -258,11 +320,42 @@ actor CoreHIDCapture {
     }
 
     private static func keyID(for element: HIDElement) -> KeyID? {
-        guard case .keyboardOrKeypad(let usage?) = element.usage,
-              KeyCatalog.countedUsageIDs.contains(usage.rawValue) else {
-            return nil
+        if case .keyboardOrKeypad(let usage?) = element.usage,
+           KeyCatalog.countedUsageIDs.contains(usage.rawValue) {
+            return KeyID(usagePage: KeyCatalog.keyboardPage, usageID: usage.rawValue)
         }
-        return KeyID(usagePage: KeyCatalog.keyboardPage, usageID: usage.rawValue)
+        if case .button(let usage?) = element.usage, (1...3).contains(usage) {
+            return KeyID(usagePage: KeyCatalog.buttonPage, usageID: usage)
+        }
+        if case .genericDesktop(let usage?) = element.usage, case .wheel = usage {
+            return KeyID(usagePage: KeyCatalog.genericDesktopPage, usageID: KeyCatalog.mouseWheelScroll)
+        }
+        // Fallback: match raw page/usage integers for devices that return
+        // un-typed HIDUsage values (common with Bluetooth mice).
+        let raw = rawPageUsage(element.usage)
+        if raw.page == KeyCatalog.keyboardPage && KeyCatalog.countedUsageIDs.contains(raw.usage) {
+            return KeyID(usagePage: KeyCatalog.keyboardPage, usageID: raw.usage)
+        }
+        if raw.page == KeyCatalog.buttonPage && (1...3).contains(raw.usage) {
+            return KeyID(usagePage: KeyCatalog.buttonPage, usageID: raw.usage)
+        }
+        if raw.page == KeyCatalog.genericDesktopPage && raw.usage == KeyCatalog.mouseWheelScroll {
+            return KeyID(usagePage: KeyCatalog.genericDesktopPage, usageID: KeyCatalog.mouseWheelScroll)
+        }
+        return nil
+    }
+
+    /// Extract raw page and usage from any HIDUsage variant, including
+    /// un-typed ones that don't match known Swift enum cases.
+    private static func rawPageUsage(_ usage: HIDUsage) -> (page: UInt16, usage: UInt16) {
+        let description = String(describing: usage)
+        // HIDUsage.description is "HIDUsage(page: <P>, usage: <U>)" for
+        // both typed and un-typed values.
+        let numbers = description
+            .components(separatedBy: CharacterSet.decimalDigits.inverted)
+            .compactMap { UInt16($0) }
+        guard numbers.count >= 2 else { return (0, 0) }
+        return (numbers[0], numbers[1])
     }
 
     private static func transportName(_ transport: HIDDeviceTransport?) -> String? {

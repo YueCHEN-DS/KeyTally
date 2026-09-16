@@ -47,10 +47,30 @@ install -m 644 "$ICNS_PATH" "$RESOURCES_DIR/AppIcon.icns"
 # Refresh Launch Services / icon cache for this bundle path.
 touch "$APP_DIR"
 
+# KeyTally is intentionally local-only: no Developer ID, Apple team, or
+# distribution identity. Each rebuilt ad-hoc binary has a new TCC identity,
+# so Input Monitoring must be granted to the final bundle after rebuilding.
 codesign --force --sign - "$APP_DIR"
 codesign --verify --deep --strict "$APP_DIR"
 
 printf '%s\n' "Built local app: $APP_DIR"
-codesign -d --verbose=4 "$APP_DIR" 2>&1 | grep -E '^(Identifier|Signature|TeamIdentifier)='
+codesign -d --verbose=4 "$APP_DIR" 2>&1 | grep -E '^(Identifier|Signature|TeamIdentifier|CDHash)='
 ls -la "$RESOURCES_DIR"
 plutil -lint "$CONTENTS_DIR/Info.plist"
+
+cat <<'NOTE'
+
+Input Monitoring note
+---------------------
+KeyTally is ad-hoc signed. Rebuilding changes its designated requirement, so
+macOS requires Input Monitoring to be granted to the new final bundle.
+
+If counting still stops:
+  1. Quit KeyTally
+  2. System Settings → Privacy & Security → Input Monitoring
+  3. Toggle KeyTally off, then on (or remove and re-add this .app)
+  4. Reopen KeyTally and press "Recheck Keyboard Access"
+
+Clean slate for this bundle id only:
+  tccutil reset ListenEvent com.local.keytally
+NOTE
